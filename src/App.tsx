@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 
 type SeatStatus = 'vacant' | 'booked' | 'due_soon' | 'overdue';
@@ -303,8 +303,7 @@ const classifySeat = (seat: SeatRecord): SeatViewModel => {
   };
 };
 
-const parseExcelBuffer = (buffer: ArrayBuffer) => {
-  const workbook = XLSX.read(buffer, { type: 'array' });
+const parseWorkbook = (workbook: XLSX.WorkBook) => {
   const worksheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
     defval: '',
@@ -374,9 +373,51 @@ const parseExcelBuffer = (buffer: ArrayBuffer) => {
   });
 };
 
+const parseExcelBuffer = (buffer: ArrayBuffer) =>
+  parseWorkbook(XLSX.read(buffer, { type: 'array' }));
+
+const parseCsvString = (csv: string) => parseWorkbook(XLSX.read(csv, { type: 'string' }));
+
 const parseExcelFile = async (file: File) => {
   const buffer = await file.arrayBuffer();
   return parseExcelBuffer(buffer);
+};
+
+// Google Sheet source of truth: edit the sheet and the board follows — no rebuild
+// or file push needed. The sheet must be shared as "Anyone with the link · Viewer".
+const GOOGLE_SHEET_ID = '1D2B-Md7VcFqMXt26zkAUPjpTmuILfsYBGQ4ZQ-Q4_HY';
+const GOOGLE_SHEET_TAB = 'Students';
+const GOOGLE_SHEET_XLSX_URL = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=xlsx`;
+const GOOGLE_SHEET_CSV_URL = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
+  GOOGLE_SHEET_TAB,
+)}`;
+
+const fetchGoogleSheetRecords = async (): Promise<SeatRecord[] | null> => {
+  const bust = `&_=${Date.now()}`;
+
+  // Preferred: native .xlsx export (byte-identical to the desktop file).
+  try {
+    const response = await fetch(`${GOOGLE_SHEET_XLSX_URL}${bust}`, { cache: 'no-store' });
+    if (response.ok) {
+      const parsed = parseExcelBuffer(await response.arrayBuffer());
+      if (parsed.length) return parsed;
+    }
+  } catch {
+    // Cross-origin/network issue — fall through to the CSV endpoint.
+  }
+
+  // Fallback: the CORS-friendly gviz CSV endpoint.
+  try {
+    const response = await fetch(`${GOOGLE_SHEET_CSV_URL}${bust}`, { cache: 'no-store' });
+    if (response.ok) {
+      const parsed = parseCsvString(await response.text());
+      if (parsed.length) return parsed;
+    }
+  } catch {
+    // Both remote attempts failed; caller falls back to the bundled file.
+  }
+
+  return null;
 };
 
 const formatRelative = (days?: number) => {
@@ -425,27 +466,42 @@ export default function App() {
     setIsDrawerOpen(true);
   };
 
-  useEffect(() => {
-    const loadBundledSheet = async () => {
-      try {
-        for (const path of ['/Students_Final.xlsx', '/Students.xlsx']) {
-          const response = await fetch(path, { cache: 'no-store' });
-          if (!response.ok) continue;
+  const [isSyncing, setIsSyncing] = useState(false);
 
-          const parsed = parseExcelBuffer(await response.arrayBuffer());
-          if (!parsed.length) continue;
-
-          setRecords(parsed);
-          setLastUpdateLabel(`Auto-loaded ${path.slice(1)}`);
-          break;
-        }
-      } catch {
-        // Ignore auto-load errors and let user upload manually.
+  const loadFromGoogleSheet = useCallback(async () => {
+    setIsSyncing(true);
+    try {
+      const remote = await fetchGoogleSheetRecords();
+      if (remote && remote.length) {
+        setRecords(remote);
+        setSelectedSeat(null);
+        setIsDrawerOpen(false);
+        setLastUpdateLabel(`Synced from Google Sheet · ${new Date().toLocaleTimeString()}`);
+        return;
       }
-    };
 
-    void loadBundledSheet();
+      // Google Sheet unreachable (offline or not shared) — use the bundled copy.
+      for (const path of ['/Students_Final.xlsx', '/Students.xlsx']) {
+        const response = await fetch(path, { cache: 'no-store' });
+        if (!response.ok) continue;
+
+        const parsed = parseExcelBuffer(await response.arrayBuffer());
+        if (!parsed.length) continue;
+
+        setRecords(parsed);
+        setLastUpdateLabel(`Loaded local ${path.slice(1)} · Google Sheet unavailable`);
+        break;
+      }
+    } catch {
+      // Ignore load errors and let the user upload manually.
+    } finally {
+      setIsSyncing(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadFromGoogleSheet();
+  }, [loadFromGoogleSheet]);
 
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -571,7 +627,15 @@ export default function App() {
       </section>
 
       <section className="bottom-actions" aria-label="Actions">
-        <label className="button button--primary">
+        <button
+          className="button button--primary"
+          onClick={() => void loadFromGoogleSheet()}
+          type="button"
+          disabled={isSyncing}
+        >
+          {isSyncing ? 'Syncing…' : 'Sync from Google Sheet'}
+        </button>
+        <label className="button button--ghost">
           Upload Excel
           <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleUpload} />
         </label>
