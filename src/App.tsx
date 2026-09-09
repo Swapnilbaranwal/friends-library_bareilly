@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 
-type SeatStatus = 'vacant' | 'booked' | 'due_soon' | 'overdue';
+type SeatStatus = 'vacant' | 'booked' | 'due_soon' | 'overdue' | 'coming_soon';
 
 type SeatRecord = {
-  seatNo: number;
+  seatNo: number | string;
   studentName: string;
   joiningDate?: string;
   feeDueDate?: string;
@@ -23,15 +23,16 @@ type SeatViewModel = SeatRecord & {
 const TOTAL_SEATS = 50;
 const DUE_SOON_WINDOW = 3;
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const SEAT_LAYOUT_ROWS: Array<{ left: number[]; right: number[] }> = [
+const SEAT_LAYOUT_ROWS: Array<{ left: (number | string)[]; right: (number | string)[] }> = [
   { left: [50, 49, 48, 47, 46], right: [41, 42, 43, 44, 45] },
   { left: [40, 39, 38, 37, 36], right: [31, 32, 33, 34, 35] },
   { left: [30, 29, 28, 27, 26], right: [21, 22, 23, 24, 25] },
   { left: [20, 19, 18, 17, 16], right: [11, 12, 13, 14, 15] },
   { left: [10, 9, 8, 7, 6], right: [1, 2, 3, 4, 5] },
+  { left: ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'], right: ['A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15', 'A16'] },
 ];
 
-const emptySeat = (seatNo: number): SeatRecord => ({
+const emptySeat = (seatNo: number | string): SeatRecord => ({
   seatNo,
   studentName: '',
   active: false,
@@ -251,21 +252,44 @@ const getDaysUntil = (dateString?: string) => {
 };
 
 const buildSeats = (records: SeatRecord[]) => {
-  const bySeat = new Map<number, SeatRecord>();
+  const bySeat = new Map<number | string, SeatRecord>();
 
   records.forEach((record) => {
-    if (record.seatNo >= 1 && record.seatNo <= TOTAL_SEATS) {
+    if (typeof record.seatNo === 'number' && record.seatNo >= 1 && record.seatNo <= TOTAL_SEATS) {
+      bySeat.set(record.seatNo, record);
+    } else if (typeof record.seatNo === 'string') {
       bySeat.set(record.seatNo, record);
     }
   });
 
-  return Array.from({ length: TOTAL_SEATS }, (_, index) => {
+  const numericSeats = Array.from({ length: TOTAL_SEATS }, (_, index) => {
     const seatNo = index + 1;
     return bySeat.get(seatNo) ?? emptySeat(seatNo);
   });
+
+  // Add A-series seats (A1-A16) as "coming soon"
+  const aSeriesSeats = Array.from({ length: 16 }, (_, index) => {
+    const seatNo = `A${index + 1}`;
+    return bySeat.get(seatNo) ?? emptySeat(seatNo);
+  });
+
+  return [...numericSeats, ...aSeriesSeats];
 };
 
 const classifySeat = (seat: SeatRecord): SeatViewModel => {
+  // Check if this is a coming-soon seat (A7-A16 only, A1-A6 are available for booking)
+  if (typeof seat.seatNo === 'string' && seat.seatNo.startsWith('A')) {
+    const seatLetter = seat.seatNo.substring(1);
+    const seatNum = Number(seatLetter);
+    if (seatNum >= 7 && seatNum <= 16) {
+      return {
+        ...seat,
+        status: 'coming_soon',
+        statusLabel: 'Coming soon',
+      };
+    }
+  }
+
   const isOccupied = seat.active;
   const dueInDays = getDaysUntil(seat.feeDueDate);
 
@@ -318,7 +342,8 @@ const parseWorkbook = (workbook: XLSX.WorkBook) => {
       const key = getHeaderKey(header);
 
       if (key === 'seatNo') {
-        mapped.seatNo = Number(value);
+        const numValue = Number(value);
+        mapped.seatNo = Number.isNaN(numValue) ? String(value).trim() : numValue;
       } else if (key === 'studentName') {
         mapped.studentName = String(value ?? '').trim();
       } else if (key === 'joiningDate') {
@@ -433,6 +458,8 @@ export default function App() {
   const [records, setRecords] = useState<SeatRecord[]>([]);
   const [selectedSeat, setSelectedSeat] = useState<SeatViewModel | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [hoveredSeat, setHoveredSeat] = useState<SeatViewModel | null>(null);
+  const [hoveredPosition, setHoveredPosition] = useState<{ x: number; y: number } | null>(null);
   const [lastUpdateLabel, setLastUpdateLabel] = useState('No file loaded');
 
   const seats = useMemo(() => buildSeats(records).map(classifySeat), [records]);
@@ -444,7 +471,7 @@ export default function App() {
         accumulator[seat.status] += 1;
         return accumulator;
       },
-      { vacant: 0, booked: 0, due_soon: 0, overdue: 0 },
+      { vacant: 0, booked: 0, due_soon: 0, overdue: 0, coming_soon: 0 },
     );
   }, [seats]);
 
@@ -456,7 +483,10 @@ export default function App() {
   const activeWithoutValidSeatCount = useMemo(
     () =>
       records.filter(
-        (record) => record.active && !(record.seatNo >= 1 && record.seatNo <= TOTAL_SEATS),
+        (record) => record.active && !(
+          (typeof record.seatNo === 'number' && record.seatNo >= 1 && record.seatNo <= TOTAL_SEATS) ||
+          (typeof record.seatNo === 'string' && record.seatNo.startsWith('A'))
+        ),
       ).length,
     [records],
   );
@@ -596,6 +626,7 @@ export default function App() {
             <LegendItem color="yellow" label="Due soon" />
             <LegendItem color="red" label="Overdue" />
             <LegendItem color="grey" label="Vacant" />
+            <LegendItem color="blue" label="Coming soon" />
           </div>
         </div>
 
@@ -606,24 +637,96 @@ export default function App() {
           <div className="room__desk">Library desk</div>
 
           <div className="seat-rows" aria-label="Seat rows">
-            {SEAT_LAYOUT_ROWS.map((row) => (
-              <div
-                key={`row-${row.left[0]}-${row.right[0]}`}
-                className="seat-row"
-              >
-                {row.left.map((seatNo) => {
-                  const seat = seatsByNo.get(seatNo);
-                  return seat ? <SeatTile key={seatNo} seat={seat} onShow={showSeat} /> : null;
-                })}
-                <div className="seat-row__aisle" aria-hidden="true" />
-                {row.right.map((seatNo) => {
-                  const seat = seatsByNo.get(seatNo);
-                  return seat ? <SeatTile key={seatNo} seat={seat} onShow={showSeat} /> : null;
-                })}
-              </div>
-            ))}
+            {SEAT_LAYOUT_ROWS.map((row) => {
+              const isMultiSeats = row.left.length !== 5;
+              return (
+                <div
+                  key={`row-${row.left[0]}-${row.right[0]}`}
+                  className={`seat-row ${isMultiSeats ? 'seat-row--multi' : ''}`}
+                >
+                  {row.left.map((seatNo) => {
+                    const seat = seatsByNo.get(seatNo);
+                    return seat ? (
+                      <SeatTile
+                        key={seatNo}
+                        seat={seat}
+                        onShow={showSeat}
+                        onHover={(s, pos) => {
+                          setHoveredSeat(s);
+                          setHoveredPosition(pos);
+                        }}
+                        onHoverLeave={() => setHoveredSeat(null)}
+                      />
+                    ) : null;
+                  })}
+                  <div className="seat-row__aisle" aria-hidden="true" />
+                  {row.right.map((seatNo) => {
+                    const seat = seatsByNo.get(seatNo);
+                    return seat ? (
+                      <SeatTile
+                        key={seatNo}
+                        seat={seat}
+                        onShow={showSeat}
+                        onHover={(s, pos) => {
+                          setHoveredSeat(s);
+                          setHoveredPosition(pos);
+                        }}
+                        onHoverLeave={() => setHoveredSeat(null)}
+                      />
+                    ) : null;
+                  })}
+                </div>
+              );
+            })}
           </div>
         </div>
+
+        {hoveredSeat && hoveredPosition && (
+          <div
+            className={`seat-popup seat-popup--${hoveredSeat.status}`}
+            style={{
+              position: 'fixed',
+              left: `${hoveredPosition.x}px`,
+              top: `${hoveredPosition.y}px`,
+              zIndex: 1000
+            }}
+          >
+            <div className={`seat-popup__badge seat-popup__badge--${hoveredSeat.status}`}>
+              {hoveredSeat.statusLabel}
+            </div>
+            <h4 className="seat-popup__title">Seat {hoveredSeat.seatNo}</h4>
+            <dl className="seat-popup__details">
+              <div className="seat-popup__row">
+                <dt>Student</dt>
+                <dd>{hoveredSeat.studentName || 'Vacant'}</dd>
+              </div>
+              {hoveredSeat.joiningDate && (
+                <div className="seat-popup__row">
+                  <dt>Joining</dt>
+                  <dd>{hoveredSeat.joiningDate}</dd>
+                </div>
+              )}
+              {hoveredSeat.paidThroughMonth && (
+                <div className="seat-popup__row">
+                  <dt>Paid through</dt>
+                  <dd>{hoveredSeat.paidThroughMonth}</dd>
+                </div>
+              )}
+              {hoveredSeat.feeDueDate && (
+                <div className="seat-popup__row">
+                  <dt>Fee due</dt>
+                  <dd>{hoveredSeat.feeDueDate}</dd>
+                </div>
+              )}
+              {hoveredSeat.dueInDays !== undefined && (
+                <div className="seat-popup__row">
+                  <dt>Due status</dt>
+                  <dd>{formatRelative(hoveredSeat.dueInDays)}</dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        )}
       </section>
 
       <section className="bottom-actions" aria-label="Actions">
@@ -648,13 +751,32 @@ export default function App() {
   );
 }
 
-function SeatTile({ seat, onShow }: { seat: SeatViewModel; onShow: (seat: SeatViewModel) => void }) {
+function SeatTile({
+  seat,
+  onShow,
+  onHover,
+  onHoverLeave
+}: {
+  seat: SeatViewModel;
+  onShow: (seat: SeatViewModel) => void;
+  onHover: (seat: SeatViewModel, position: { x: number; y: number }) => void;
+  onHoverLeave: () => void;
+}) {
+  const handleMouseEnter = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    onHover(seat, {
+      x: rect.right + 12,
+      y: rect.top
+    });
+  };
+
   return (
     <button
       className={`seat seat--${seat.status}`}
       type="button"
-      onMouseEnter={() => onShow(seat)}
-      onFocus={() => onShow(seat)}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={onHoverLeave}
+      onFocus={() => {}}
       onClick={() => onShow(seat)}
       aria-label={`Seat ${seat.seatNo}, ${seat.statusLabel}`}
     >
@@ -673,7 +795,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone: 
   );
 }
 
-function LegendItem({ color, label }: { color: 'green' | 'yellow' | 'red' | 'grey'; label: string }) {
+function LegendItem({ color, label }: { color: 'green' | 'yellow' | 'red' | 'grey' | 'blue'; label: string }) {
   return (
     <div className="legend-item">
       <span className={`legend-item__swatch legend-item__swatch--${color}`} />
