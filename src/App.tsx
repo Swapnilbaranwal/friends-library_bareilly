@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 
-type SeatStatus = 'vacant' | 'booked' | 'due_soon' | 'overdue' | 'coming_soon';
+type SeatStatus = 'vacant' | 'booked' | 'due_soon' | 'overdue' | 'trial';
 
 type SeatRecord = {
   seatNo: number | string;
@@ -9,6 +9,7 @@ type SeatRecord = {
   joiningDate?: string;
   feeDueDate?: string;
   paidThroughMonth?: string;
+  currentMonthStatus?: 'paid' | 'unpaid' | 'trial';
   active: boolean;
   phone?: string;
   notes?: string;
@@ -20,7 +21,7 @@ type SeatViewModel = SeatRecord & {
   dueInDays?: number;
 };
 
-const TOTAL_SEATS = 50;
+const TOTAL_SEATS = 66;
 const DUE_SOON_WINDOW = 3;
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const SEAT_LAYOUT_ROWS: Array<{ left: (number | string)[]; right: (number | string)[] }> = [
@@ -220,6 +221,25 @@ const formatMonthIndex = (monthIndex: number) => {
   return `${MONTH_NAMES[month]}-${year}`;
 };
 
+const getCurrentMonthIndex = () => {
+  const today = new Date();
+  return today.getUTCFullYear() * 12 + today.getUTCMonth();
+};
+
+const getMonthStatusFromValue = (value: unknown): 'paid' | 'unpaid' | 'trial' | undefined => {
+  const normalized = normalize(value);
+  if (['paid', 'yes', 'true', '1', 'done'].includes(normalized)) {
+    return 'paid';
+  }
+  if (['unpaid', 'no', 'false', '0'].includes(normalized)) {
+    return 'unpaid';
+  }
+  if (['trial'].includes(normalized)) {
+    return 'trial';
+  }
+  return undefined;
+};
+
 const getDayFromIsoDate = (isoDate: string) => {
   const date = new Date(isoDate);
   if (Number.isNaN(date.getTime())) return undefined;
@@ -277,19 +297,6 @@ const buildSeats = (records: SeatRecord[]) => {
 };
 
 const classifySeat = (seat: SeatRecord): SeatViewModel => {
-  // Check if this is a coming-soon seat (A7-A16 only, A1-A6 are available for booking)
-  if (typeof seat.seatNo === 'string' && seat.seatNo.startsWith('A')) {
-    const seatLetter = seat.seatNo.substring(1);
-    const seatNum = Number(seatLetter);
-    if (seatNum >= 7 && seatNum <= 16) {
-      return {
-        ...seat,
-        status: 'coming_soon',
-        statusLabel: 'Coming soon',
-      };
-    }
-  }
-
   const isOccupied = seat.active;
   const dueInDays = getDaysUntil(seat.feeDueDate);
 
@@ -301,6 +308,24 @@ const classifySeat = (seat: SeatRecord): SeatViewModel => {
     };
   }
 
+  // Check current month status first
+  if (seat.currentMonthStatus === 'trial') {
+    return {
+      ...seat,
+      status: 'trial',
+      statusLabel: 'Trial',
+    };
+  }
+
+  if (seat.currentMonthStatus === 'unpaid') {
+    return {
+      ...seat,
+      status: 'overdue',
+      statusLabel: 'Payment due',
+    };
+  }
+
+  // For paid or no status, use normal fee logic
   if (typeof dueInDays === 'number' && dueInDays <= 0) {
     return {
       ...seat,
@@ -358,8 +383,15 @@ const parseWorkbook = (workbook: XLSX.WorkBook) => {
         mapped.notes = String(value ?? '').trim();
       } else {
         const monthIndex = parseMonthHeader(header);
-        if (typeof monthIndex === 'number' && isPaidCell(value)) {
-          paidMonthIndices.push(monthIndex);
+        if (typeof monthIndex === 'number') {
+          if (isPaidCell(value)) {
+            paidMonthIndices.push(monthIndex);
+          }
+          // Track current month status
+          const currentMonthIndex = getCurrentMonthIndex();
+          if (monthIndex === currentMonthIndex) {
+            mapped.currentMonthStatus = getMonthStatusFromValue(value);
+          }
         }
       }
     });
@@ -391,6 +423,7 @@ const parseWorkbook = (workbook: XLSX.WorkBook) => {
       joiningDate,
       feeDueDate: computedFeeDueDate,
       paidThroughMonth,
+      currentMonthStatus: mapped.currentMonthStatus,
       active: mapped.active ?? false,
       phone: mapped.phone,
       notes: mapped.notes,
@@ -471,7 +504,7 @@ export default function App() {
         accumulator[seat.status] += 1;
         return accumulator;
       },
-      { vacant: 0, booked: 0, due_soon: 0, overdue: 0, coming_soon: 0 },
+      { vacant: 0, booked: 0, due_soon: 0, overdue: 0, trial: 0 },
     );
   }, [seats]);
 
@@ -560,6 +593,7 @@ export default function App() {
           <StatCard label="Active students" value={activeStudentCount} tone="green" />
           <StatCard label="Booked" value={counts.booked} tone="green" />
           <StatCard label="Due soon" value={counts.due_soon} tone="yellow" />
+          <StatCard label="Trial" value={counts.trial} tone="pink" />
           <StatCard label="Overdue" value={counts.overdue} tone="red" />
         </section>
 
@@ -575,7 +609,7 @@ export default function App() {
       </section>
 
       <section className="hero">
-        <div className="hero__copy">
+        <div className="hero__copy" style={{ display: 'none' }}>
           <p className="eyebrow">FriendsDigital Library</p>
           <h1>Seat allotment that updates from Excel in real time.</h1>
           <p className="lead">
@@ -625,8 +659,8 @@ export default function App() {
             <LegendItem color="green" label="Booked" />
             <LegendItem color="yellow" label="Due soon" />
             <LegendItem color="red" label="Overdue" />
+            <LegendItem color="pink" label="Trial" />
             <LegendItem color="grey" label="Vacant" />
-            <LegendItem color="blue" label="Coming soon" />
           </div>
         </div>
 
@@ -765,7 +799,7 @@ function SeatTile({
   const handleMouseEnter = (e: React.MouseEvent<HTMLButtonElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     onHover(seat, {
-      x: rect.right + 12,
+      x: rect.left + rect.width / 2,
       y: rect.top
     });
   };
@@ -786,7 +820,7 @@ function SeatTile({
   );
 }
 
-function StatCard({ label, value, tone }: { label: string; value: number; tone: 'neutral' | 'green' | 'yellow' | 'red' }) {
+function StatCard({ label, value, tone }: { label: string; value: number; tone: 'neutral' | 'green' | 'yellow' | 'red' | 'pink' }) {
   return (
     <article className={`stat-card stat-card--${tone}`}>
       <span>{label}</span>
@@ -795,7 +829,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone: 
   );
 }
 
-function LegendItem({ color, label }: { color: 'green' | 'yellow' | 'red' | 'grey' | 'blue'; label: string }) {
+function LegendItem({ color, label }: { color: 'green' | 'yellow' | 'red' | 'pink' | 'grey'; label: string }) {
   return (
     <div className="legend-item">
       <span className={`legend-item__swatch legend-item__swatch--${color}`} />
